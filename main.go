@@ -1,88 +1,48 @@
 package main
 
 import (
-	"bufio"
-	//"encoding/csv"
+	"encoding/csv"
 	"fmt"
-
-	// "io"
+	"io/ioutil"
+	"log"
+	"os"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/tealeg/xlsx"
-
-	//"log"
-	//"net/http"
-	"os"
-	//"strings"
 )
 
-// func downloadFile(filepath string, url string) error {
-// 	// Create the file
-// 	out, err := os.Create(filepath)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer out.Close()
-
-// 	// Get the data
-// 	resp, err := http.Get(url)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer resp.Body.Close()
-
-// 	// Check server response
-// 	if resp.StatusCode != http.StatusOK {
-// 		return fmt.Errorf("bad status: %s", resp.Status)
-// 	}
-
-// 	// Writer the body to file
-// 	_, err = io.Copy(out, resp.Body)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
-
-func test() {
-	var file *xlsx.File
-	var sheet *xlsx.Sheet
-	var row *xlsx.Row
-	var cell *xlsx.Cell
-	var err error
-
-	file = xlsx.NewFile()
-	sheet, err = file.AddSheet("Sheet1")
-	if err != nil {
-		fmt.Printf(err.Error())
-	}
-	row = sheet.AddRow()
-	cell = row.AddCell()
-	cell.Value = "I am a cell!"
-	err = file.Save("MyXLSXFile.xlsx")
-	if err != nil {
-		fmt.Printf(err.Error())
-	}
-}
-
 type doc struct {
-	file  *xlsx.File
-	sheet *xlsx.Sheet
+	file   *xlsx.File
+	sheet1 *xlsx.Sheet
+	sheet2 *xlsx.Sheet
 }
 
-func (d *doc) init() error {
+func (d *doc) init(sheetName1 string, sheetName2 string) error {
 	d.file = xlsx.NewFile()
-	sheet, err := d.file.AddSheet("Sheet1")
+	sheet1, err := d.file.AddSheet(sheetName1)
 	if err != nil {
 		return err
 	}
-	d.sheet = sheet
+	sheet2, err := d.file.AddSheet(sheetName2)
+	if err != nil {
+		return err
+	}
+	d.sheet1 = sheet1
+	d.sheet2 = sheet2
 	return nil
 }
 
-func (d *doc) addRow(s []string) {
+func (d *doc) addRow(s []string, sheetName string) {
 	var cell *xlsx.Cell
-	row := d.sheet.AddRow()
+	var row *xlsx.Row
+	if sheetName == "sheet1" {
+		row = d.sheet1.AddRow()
+	} else {
+		row = d.sheet2.AddRow()
+	}
+
 	for _, x := range s {
 		cell = row.AddCell()
 		cell.Value = x
@@ -97,9 +57,46 @@ func (d *doc) save(fileName string) error {
 	return nil
 }
 
+// Date formatter
+const (
+	layoutISO    = "2006-01-02"
+	layoutCustom = "2006-01-02 15:04:05"
+)
+
 func main() {
-	fileName := "./temp.csv"
-	outName := "./test.xlsx"
+	files, err := ioutil.ReadDir("./")
+
+	if err != nil {
+		log.Fatal(err)
+	}
+	re := regexp.MustCompile("orderReport_all_(.*)_createtime.csv")
+	var fileName string
+	var queryDate string
+
+	for _, f := range files {
+		match := re.FindStringSubmatch(f.Name())
+
+		if len(match) > 1 {
+			fileName = f.Name()
+			queryDate = match[1]
+			break
+		}
+	}
+
+	d, err := time.Parse(layoutISO, queryDate)
+	if err != nil {
+		panic(err)
+	}
+	dX := d.AddDate(0, 0, -1)
+	outName := fmt.Sprintf("ECAC_orderinfo_%d%02d%02dcreatetime.xlsx", dX.Year(), dX.Month(), dX.Day())
+	sheetName1 := fmt.Sprintf("%02d%02d", dX.Month(), dX.Day())
+	sheetName2 := fmt.Sprintf("%02d%02d", d.Month(), d.Day())
+
+	//- For debug and testing
+	//fileName = "./temp.csv"
+	//fileName = "./orderReport_all_2019-05-11_createtime.csv"
+	//outName := "ECAC_orderinfo_20190510createtime.xlsx"
+	//outName := "./test.xlsx"
 
 	csvFile, err := os.Open(fileName)
 	if err != nil {
@@ -107,96 +104,66 @@ func main() {
 	}
 	defer csvFile.Close()
 
-	scanner := bufio.NewScanner(csvFile)
-	header := []string{}
-	out := doc{}
+	r := csv.NewReader(csvFile)
+	r.Comma = ','
+	r.FieldsPerRecord = -1
+	lines, err := r.ReadAll()
+	if err != nil {
+		log.Fatalf("error reading all lines: %v", err)
+	}
 
-	err = out.init()
+	// Initial xlsx object
+	out := doc{}
+	err = out.init(sheetName1, sheetName2)
 	if err != nil {
 		panic(err)
 	}
 
-	for scanner.Scan() {
-		s := strings.Split(scanner.Text(), ",")
+	header := []string{}
+
+	for _, s := range lines {
 		if len(s) < 2 {
 			continue
 		}
 		if len(header) == 0 {
 			header = s
+			out.addRow(header, "sheet1")
+			out.addRow(header, "sheet2")
 			continue
 		}
-		out.addRow(s)
-		//ip, port := s[0], s[1]
-		//fmt.Println(s)
+
+		dateStr := strings.Trim(s[4], "\"")
+		orderTime, err := time.Parse(layoutCustom, dateStr)
+		dateStr = strings.Trim(s[11], "\"")
+		createTime, err := time.Parse(layoutCustom, dateStr)
+
+		d1, err := time.Parse(layoutISO, "2019-01-01")
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+		d2, err := time.Parse(layoutISO, queryDate) // orderReport_all_2019-05-11_createtime => 2019-05-11
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+		d3 := d2.AddDate(0, 0, -1) // 2019-05-10 =  019-05-11 minus one day
+
+		//select * where E > date '2019-01-01' and L >= date '2019-05-10' and L < date '2019-05-11'
+		if orderTime.After(d1) && (createTime.After(d3) || createTime.Equal(d3)) && createTime.Before(d2) {
+			out.addRow(s, "sheet1")
+		} else if createTime.After(d2) || createTime.Equal(d2) {
+			//select * where L >= date '2019-05-11'
+			out.addRow(s, "sheet2")
+		}
 	}
 
+	// Save to new xlsx file
 	err = out.save(outName)
 	if err != nil {
 		panic(err)
 	}
-	//fmt.Println(header)
+	fmt.Printf("Successfully output to file %s\n", outName)
+	fmt.Printf("Sheet1 has %d rows\n", len(out.sheet1.Rows))
+	fmt.Printf("Sheet2 has %d rows\n", len(out.sheet2.Rows))
 }
-
-// func main2() {
-// 	// url := "https://buy.line.me/manager/admin/downloadReport?exportFile=1&key=orderReport:all_2019-05-11_createtime.csv"
-// 	//fileName := "./orderReport_all_2019-05-11_createtime.csv"
-// 	fileName := "./temp.csv"
-
-// 	// err := downloadFile(fileName, url)
-// 	// if err != nil {
-// 	// 	log.Fatal(err)
-// 	// }
-// 	csvFile, err := os.Open(fileName)
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	defer csvFile.Close()
-
-// 	reader := csv.NewReader(csvFile)
-// 	reader.FieldsPerRecord = -1 // optional
-// 	reader.TrimLeadingSpace = true
-
-// 	lines, err := reader.ReadAll()
-// 	if err != nil {
-// 		panic(err)
-// 	}
-
-// 	i := 0
-// 	for _, line := range lines {
-// 		data := CsvLine{
-// 			Column1: line[0],
-// 			Column2: line[1],
-// 		}
-// 		if i > 10 {
-// 			break
-// 		}
-// 		fmt.Println(data.Column1 + " " + data.Column2)
-// 	}
-
-// 	// r := csv.NewReader(csvFile)
-
-// 	// for {
-// 	// 	record, err := r.Read()
-// 	// 	if err == io.EOF {
-// 	// 		break
-// 	// 	}
-// 	// 	if err != nil {
-// 	// 		log.Fatal(err)
-// 	// 	}
-
-// 	// 	fmt.Println(record)
-// 	// }
-// 	// for i :=0 ; i < 10; i++{
-// 	// 	record, err := r.Read()
-// 	// 	if err == io.EOF {
-// 	// 		break
-// 	// 	}
-// 	// 	if err != nil {
-// 	// 		log.Fatal(err)
-// 	// 	}
-
-// 	// 	fmt.Println(record)
-// 	// }
-
-// 	fmt.Println("hello")
-// }
